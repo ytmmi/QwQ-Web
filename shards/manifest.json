@@ -1,0 +1,42 @@
+{
+  "schema": "wenzhiyan/shards@1",
+  "generatedAt": "2026-11-01T08:20:09.106Z",
+  "counts": {
+    "general": 1651,
+    "large": 256,
+    "traditional": 374,
+    "total": 1907
+  },
+  "boot": {
+    "general": 90,
+    "large": 20
+  },
+  "pages": [
+    {
+      "name": "rest-general-000",
+      "general": 512,
+      "large": 0
+    },
+    {
+      "name": "rest-general-001",
+      "general": 512,
+      "large": 0
+    },
+    {
+      "name": "rest-general-002",
+      "general": 512,
+      "large": 0
+    },
+    {
+      "name": "rest-general-003",
+      "general": 25,
+      "large": 0
+    },
+    {
+      "name": "rest-large-000",
+      "general": 0,
+      "large": 236
+    }
+  ],
+  "index": "index"
+}

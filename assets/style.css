@@ -1,0 +1,1144 @@
+/* ==========================================================================
+   文字颜 · wenzhiyan
+   设计方向：简约可爱（minimal cute）
+
+   用户两次定调：① 要可爱，体现颜文字的可爱属性；② 不要过于拟物，要简约。
+   所以这一版的取向是：
+     - 可爱来自**配色 + 圆角 + 一点点歪**，不来自拟物材质（不要厚阴影、不要贴纸反光、
+       不要糖果纸渐变、不要立体按钮）。
+     - 简约来自**留白 + 细线 + 少层级**：1px 描边、极淡投影（或干脆无投影）、
+       大量空白、字号克制。
+     - 三个强调色足够。多一个颜色就散。
+
+   三条技术底线（不要为了好看破坏）：
+     1. 零外部依赖：无字体文件、无 CDN、无图片。所有纹理用 CSS 画或干脆不画。
+     2. 颜文字本体必须等宽：多行大型颜文字靠空格对齐，混入比例字体立刻歪。
+        可爱可以体现在容器上（圆角/颜色/间距），不能体现在字形宽度上。
+     3. 正文对比度 ≥ 4.5:1。彩色只做装饰和底色，正文一律用墨色。
+   ========================================================================== */
+
+/* ------------------------------------------------------------------ tokens */
+:root {
+  /* 底色：比纯白暖一点点，避免刺眼 */
+  --bg:          #fdfbf9;
+  --surface:     #ffffff;
+  --surface-alt: #faf7f8;
+  --well:        #f6f1f4;
+
+  /* 墨色：暖梅子棕，比纯黑柔和，配粉不失焦。
+     四级阶梯（ink → ink-faint）由 build/derive-ink.mjs 反解出来：
+     每一级都保证在**所有可能承载文字的底色**（页面底 #fdfbf9、白卡 #ffffff、
+     --surface-alt、--well #f6f1f4、以及各种 *-wash 淡彩底）上仍然满足
+     WCAG AA 4.5:1，而不是只对页面底达标。
+     实测最差底色是 --well（比页面底更暗一点点），所以门槛按它算。
+     原值 ink-muted #96808c / ink-faint #c2b0ba 在 --well 上只有 3.53 / 1.99，
+     标签维度行实测 1.99:1 —— 那种「淡雅」是拿可读性换的，不接受。 */
+  --ink:         #3f3139;   /* 最差 11.00:1 */
+  --ink-soft:    #564a51;   /* 最差  7.50:1 */
+  --ink-muted:   #695f65;   /* 最差  5.50:1 */
+  --ink-faint:   #756b71;   /* 最差  4.60:1 —— 最弱的一级，仍过 AA */
+
+  /* 三个强调色。够用了 —— 再加只会散。 */
+  --pink:        #f2799c;
+  --pink-deep:   #dc5c83;
+  --pink-soft:   #ffd9e4;
+  --pink-wash:   #fff3f7;
+
+  --mint:        #58c0a4;
+  --mint-soft:   #cdeee4;
+  --mint-wash:   #f0fbf7;
+
+  --lilac:       #9b86dd;
+  --lilac-soft:  #e2d9f8;
+  --lilac-wash:  #f7f3ff;
+
+  /* 辅助色：偶尔用在情绪标签上，不做主视觉 */
+  --sun:         #eab04a;
+  --sun-soft:    #efd9b0;
+  --sun-wash:    #fdf6e6;
+  --sky:         #6bb0dd;
+  --sky-wash:    #f0f8fd;
+  --coral:       #ee8264;
+  --coral-wash:  #fff4f1;
+
+  /* ---- 文字安全的强调色 ----------------------------------------------------
+     上面的 --pink-deep / --mint / --lilac / --sun / --sky / --coral 只为**装饰**
+     而挑（描边、淡彩底、图标），实测当文字只有 1.7–3.5:1，不能拿来写字。
+     下面这组是同一色相加深到 4.5:1 的版本，专供 color: 使用。
+     数值由 build/derive-accent-ink.mjs 反解（色相偏移 < 0.4°，肉眼仍是同一个色）。
+     规则：**描边/背景用原色，文字用 -ink 变体。**
+     ---- */
+  --pink-deep-ink: #d1285c;
+  --mint-ink:      #2a7c66;
+  --lilac-ink:     #7759d3;
+  --sun-ink:       #986409;
+  --sky-ink:       #2074ab;
+  --coral-ink:     #cd380e;
+
+  /* 深底上的二级文字：pressed 态的情绪 chip 用 --ink 做底，
+     原来的 --ink-faint 叠上去只有 2.40:1。这个色专供「深底 + 弱化文字」。 */
+  --on-ink-weak:   #a39da1;
+
+  --line:        #f0e6eb;
+  --line-strong: #e2d3db;
+
+  /* 投影：极淡、极短。拟物感的来源就是重阴影，这里刻意压掉。 */
+  --sh-1: 0 1px 2px rgba(90, 60, 75, 0.05);
+  --sh-2: 0 2px 8px -2px rgba(90, 60, 75, 0.09);
+  --sh-3: 0 8px 24px -12px rgba(90, 60, 75, 0.16);
+
+  /* 圆角：可爱的主要来源，但要克制 —— 不做超大圆角，避免糖果按钮感 */
+  --r-xs: 6px;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 18px;
+  --r-pill: 999px;
+
+  /* 字体栈 ----------------------------------------------------------------
+     --ff-ui 负责界面文字：优先系统圆体，没有就退到无衬线。
+     Windows 没有中文圆体，靠字重偏轻 + 字距微松补柔感，绝不为此引外部字体。
+     --ff-mono 是等宽族，用于需要严格对齐的小地方（计数、尺寸标签）。
+     --ff-art 是**颜文字本体**用的栈：系统 UI 比例字体。字符本来就不是等宽的
+       （空格 0.28em、★ 1.0em、あ 1.0em、꒰ 0.68em 各有各的设计宽度），
+       硬拉成一样宽会把字形压扁、把间距撑散 —— 直接交给系统字体排才是对的，
+       所见效果与微信/系统记事本里看到的一致。 */
+  --ff-ui:   "Yuanti SC", "Hiragino Maru Gothic ProN", "M PLUS Rounded 1c",
+             "Varela Round", "Quicksand", "Nunito",
+             "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+             "Noto Sans SC", system-ui, sans-serif;
+  --ff-mono: "Cascadia Mono", "JetBrains Mono", "SF Mono", Menlo, Consolas,
+             "DejaVu Sans Mono", "Liberation Mono", "Courier New", ui-monospace, monospace;
+
+  /* 颜文字本体的字体栈：比例字体在前（系统 UI，和微信里看到的一致），
+     **冷僻字符靠逐字形回退**，所以脚本字体接在后面。
+     这里绝对不能让等宽族打头 —— 等宽族里装饰符号（★ ♡ ❀）没有等宽字形，
+     会逐字回退到别的字体，结果成了「有的字等宽、有的字不等宽」的混合体，
+     行与行反而更歪。字符本来就不是等宽的，交给系统字体自然排才对。 */
+  --ff-art:   "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+              "Segoe UI", system-ui, "Noto Sans SC", sans-serif;
+
+  /* --ff-sym 是「含冷僻字符的条目」用的栈：在 --ff-art 基础上接一串
+     覆盖面极广的脚本字体（常规比例字体在前，广覆盖在后）。
+
+     后半段专门兜「偏远小国字符」：加拿大原住民音节、瓦伊文、奥里亚文、切罗基、
+     埃塞俄比亚、格鲁吉亚、卡纳达、僧伽罗、缅甸、高棉、老挝、泰米尔、蒙古、卢恩。
+     Windows：Ebrima / Nirmala UI / Leelawadee UI / Sylfaen / Nyala / Gadugi /
+     Euphemia / Mongolian Baiti / Microsoft Himalaya / Myanmar Text / Segoe UI Historic。
+     macOS：Apple Symbols / Kailasa / Myanmar Sangam MN / STIX Two Math。
+     Linux：Noto Sans Symbols 2 / Noto Sans Math / Symbola / FreeSerif。 */
+  --ff-sym:   var(--ff-art),
+              "Segoe UI Symbol", "Segoe UI Historic",
+              Ebrima, "Nirmala UI", "Leelawadee UI", Sylfaen, Nyala, Gadugi,
+              Euphemia, "Mongolian Baiti", "Microsoft Himalaya", "Myanmar Text",
+              "Apple Symbols", "Kailasa", "Myanmar Sangam MN", "STIX Two Math",
+              "Noto Sans Symbols 2", "Noto Sans Symbols", "Noto Sans Math", Symbola,
+              "FreeSerif", "Noto Sans", "Arial Unicode MS", sans-serif;
+
+  --measure: 74rem;
+  --gutter: clamp(1.1rem, 4vw, 2.8rem);
+  --mast-h: 3.4rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:          #1b171b;
+    --surface:     #241e24;
+    --surface-alt: #2a232a;
+    --well:        #302830;
+
+    /* 暗色阶梯同样由 build/derive-ink.mjs 反解，最差底色是 --well #302830 */
+    --ink:         #e8e0e5;   /* 最差 11.00:1 */
+    --ink-soft:    #c2babf;   /* 最差  7.50:1 */
+    --ink-muted:   #a69fa3;   /* 最差  5.50:1 */
+    --ink-faint:   #979095;   /* 最差  4.60:1 */
+
+    --pink:        #ff96b4;
+    --pink-deep:   #ff7ba0;
+    --pink-soft:   #55323f;
+    --pink-wash:   #32242b;
+
+    --mint:        #6fd9b9;
+    --mint-soft:   #2c4d44;
+    --mint-wash:   #1f2d29;
+
+    --lilac:       #b8a3f2;
+    --lilac-soft:  #3f3459;
+    --lilac-wash:  #272232;
+
+    --sun:         #f5c766;
+    --sun-soft:    #55452a;
+    --sun-wash:    #332b1a;
+    --sky:         #86c8ee;
+    --sky-wash:    #1d2c35;
+    --coral:       #ffa287;
+    --coral-wash:  #33231f;
+
+    /* 暗色主题里强调色本身已经被提亮过，实测当文字都有 5.8–8.8:1，
+       直接复用即可（--pink-deep #ff7ba0 = 5.84、--mint #6fd9b9 = 8.36 …）。
+       但 -ink 变量仍需定义 —— 否则亮色主题的值会漏进来，在深底上变成黑字。 */
+    --pink-deep-ink: #ff7ba0;
+    --mint-ink:      #6fd9b9;
+    --lilac-ink:     #b8a3f2;
+    --sun-ink:       #f5c766;
+    --sky-ink:       #86c8ee;
+    --coral-ink:     #ffa287;
+
+    /* 深底 = 亮墨 #e8e0e5，上面的弱化文字要够深才看得清 */
+    --on-ink-weak:   #676266;
+
+    --line:        #332a32;
+    --line-strong: #473b44;
+
+    --sh-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --sh-2: 0 2px 8px -2px rgba(0, 0, 0, 0.4);
+    --sh-3: 0 8px 24px -12px rgba(0, 0, 0, 0.55);
+  }
+}
+
+/* ------------------------------------------------------------------ reset */
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+  scroll-padding-top: calc(var(--mast-h) + 1rem);
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--ff-ui);
+  font-size: 16px;
+  line-height: 1.75;
+  /* 极淡的双色光斑，让纯色底不至于死板。不用图片、不用波点（波点偏拟物）。 */
+  background-image:
+    radial-gradient(ellipse 70% 50% at 15% 0%, var(--pink-wash) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 45% at 90% 8%, var(--lilac-wash) 0%, transparent 62%);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+h1, h2, h3 { margin: 0; font-weight: 600; line-height: 1.3; }
+p { margin: 0; }
+button { font: inherit; color: inherit; }
+a { color: inherit; }
+
+::selection { background: var(--pink-soft); color: var(--ink); }
+
+:focus-visible {
+  outline: 2px solid var(--pink-deep);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ------------------------------------------------------------------ 顶栏 */
+.masthead {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  height: var(--mast-h);
+  padding: 0 var(--gutter);
+  background: color-mix(in srgb, var(--bg) 84%, transparent);
+  backdrop-filter: blur(12px) saturate(1.4);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  text-decoration: none;
+  min-width: 0;
+  padding: 0.2rem 0.55rem 0.2rem 0.35rem;
+  border-radius: var(--r-pill);
+  transition: background 0.15s;
+}
+.brand:hover { background: var(--pink-wash); }
+
+/* 站标：文档指定的图标 ✧(^> 颜 <^)✧
+   等宽渲染，防止不同字体把 ^ 和 < > 排歪。 */
+.brand__icon {
+  font-family: var(--ff-sym);
+  font-size: 0.86rem;
+  color: var(--pink-deep-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.02em;
+}
+
+.brand__name {
+  font-size: 1.06rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  white-space: nowrap;
+  color: var(--ink);
+}
+
+/* 顶栏只留品牌与收录数：导航链接已按要求隐藏（页脚仍可跳转到两个分区）。 */
+.masthead__count {
+  margin-left: auto;
+  font-family: var(--ff-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  color: var(--ink-muted);
+  padding: 0.16rem 0.56rem;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+@media (max-width: 820px) {
+  .masthead__count { font-size: 0.66rem; padding: 0.14rem 0.48rem; }
+  .brand__name { letter-spacing: 0.1em; }
+}
+
+/* 窄屏：站标必须完整可见（它就是本站的图标，不能被省略号吃掉），
+   宁可让品牌名字换行、让图标往下缩一号。 */
+@media (max-width: 560px) {
+  .brand { padding: 0.15rem 0.3rem; gap: 0.35rem; }
+  .brand__icon {
+    font-size: 0.72rem;
+    overflow: visible;
+    text-overflow: clip;
+    flex: none;
+  }
+  .brand__name { font-size: 0.98rem; letter-spacing: 0.06em; }
+}
+
+/* ------------------------------------------------------------------ 首屏 */
+/* 首屏就是颜文字河本身：没有大标题压在河上，河直接占据首屏顶端。
+   只在视觉上隐藏一个 h1，保住文档标题层级。 */
+.hero {
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+}
+
+/* 河：每条泳道一行，泳道内内容复制两份首尾相接，方向统一向右。 */
+.river {
+  position: relative;
+  height: clamp(190px, 26vw, 300px);
+  /* 两端淡出，避免颜文字被裁一半显得脏 */
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 6%, #000 94%, transparent 100%);
+          mask-image: linear-gradient(90deg, transparent 0, #000 6%, #000 94%, transparent 100%);
+}
+
+/* 每个颜文字自己跑：位置、字号、速度、相位全部独立，没有共享的「泳道」 */
+.river__item {
+  position: absolute;
+  top: var(--top, 50%);
+  left: 0;
+  will-change: transform;
+  animation-name: drift-right;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  /* 颜文字本体一律等宽 + 禁止连字，保证字形宽度可预测 */
+  font-family: var(--ff-mono);
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  white-space: pre;
+  padding: 0 1.1em;
+  line-height: 1.2;
+  color: var(--ink);
+  opacity: var(--o, 0.5);
+  user-select: none;
+  /* 垂直居中到自己的 top 锚点 */
+  transform: translate3d(-100%, -50%, 0);
+}
+
+/* 从左侧外 (-100%，即元素右缘贴着视口左边界) 走到右侧外 (+100vw)。
+   位移距离 = 100vw + 自身宽，与 app.js 里 dur = (vw + w) / speed 完全对应，
+   因此每个元素的速度才是真实的 px/s，而不是被长短不一的元素拖着走。 */
+@keyframes drift-right {
+  from { transform: translate3d(-100%, -50%, 0); }
+  to   { transform: translate3d(100vw, -50%, 0); }
+}
+/* 含冷僻符号的条目走符号字体栈兜底 */
+.river__item--sym { font-family: var(--ff-sym); }
+
+/* 这里刻意不写任何悬停/聚焦暂停规则。
+   曾经加上过悬停暂停，结果鼠标划过首屏整片就停住，动画看起来像卡死了。
+   按用户要求取消：动画一旦开始就一直跑（prefers-reduced-motion 仍然尊重，
+   见下面的媒体查询）。 */
+
+@media (prefers-reduced-motion: reduce) {
+  .river {
+    display: flex; flex-wrap: wrap; align-content: center;
+    justify-content: center; gap: 0.3rem 1rem;
+    height: auto; padding: 1.2rem var(--gutter);
+  }
+  .river__item {
+    position: static; transform: none; animation: none;
+    padding: 0;
+  }
+  .river__item:nth-child(n + 25) { display: none; }
+}
+
+
+/* ------------------------------------------------------------------ 工具条 */
+.toolbar {
+  position: sticky;
+  top: var(--mast-h);
+  z-index: 40;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(12px) saturate(1.4);
+  border-bottom: 1px solid var(--line);
+}
+
+.toolbar__inner {
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding: 0.65rem var(--gutter) 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+/* 搜索框：细边药丸，focus 只加一圈淡粉光，不做发光特效 */
+.search {
+  position: relative;
+  flex: 1 1 13rem;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  padding: 0.26rem 0.8rem;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.search:focus-within {
+  border-color: var(--pink);
+  box-shadow: 0 0 0 3px var(--pink-wash);
+}
+
+.search__icon {
+  font-family: var(--ff-mono);
+  color: var(--ink-faint);
+  font-size: 0.86rem;
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font-family: var(--ff-ui);
+  font-size: 0.92rem;
+  color: var(--ink);
+  padding: 0.04rem 0;
+}
+.search input:focus { outline: none; }
+.search input::placeholder { color: var(--ink-faint); }
+
+.search__clear {
+  border: 0;
+  background: var(--well);
+  color: var(--ink-muted);
+  cursor: pointer;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 50%;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.search__clear:hover { background: var(--pink-soft); color: var(--ink); }
+.search[data-filled="1"] .search__clear { display: flex; }
+
+/* 视图切换：浅底药丸，选中项用白底 + 细边，不用实色填充 */
+.segmented {
+  display: flex;
+  gap: 0.1rem;
+  background: var(--well);
+  border-radius: var(--r-pill);
+  padding: 0.16rem;
+  flex: 0 0 auto;
+}
+.segmented button {
+  border: 0;
+  background: transparent;
+  padding: 0.24rem 0.8rem;
+  border-radius: var(--r-pill);
+  font-size: 0.81rem;
+  font-weight: 500;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.segmented button:hover { color: var(--ink); }
+.segmented button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--sh-1);
+  font-weight: 600;
+}
+
+.toolbar__right {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-left: auto;
+}
+
+.result-count {
+  font-family: var(--ff-mono);
+  font-size: 0.72rem;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+.result-count b { color: var(--ink); font-weight: 600; }
+
+/* 情绪筛选 chips */
+.moods {
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding: 0 var(--gutter) 0.6rem;
+  display: flex;
+  gap: 0.32rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.moods::-webkit-scrollbar { display: none; }
+
+.chip {
+  flex: 0 0 auto;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink-soft);
+  border-radius: var(--r-pill);
+  padding: 0.18rem 0.72rem;
+  font-size: 0.77rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.14s, color 0.14s, background 0.14s;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+.chip:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+.chip__n {
+  font-family: var(--ff-mono);
+  font-size: 0.64rem;
+  color: var(--ink-faint);
+}
+.chip[aria-pressed="true"] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--bg);
+}
+.chip[aria-pressed="true"] .chip__n { color: var(--on-ink-weak); }
+
+/* ------------------------------------------------------------ 标签筛选 */
+/*
+ * 情绪条只有 12 个；标签是 61 个受控词分 6 个维度。
+ * 所以分两层：上面一行是维度（很小、极淡），下面是该维度的词条。
+ * 视觉上刻意比情绪条更轻 —— 情绪是主入口，标签是深挖入口，
+ * 不该抢同一层的注意力。
+ */
+.tags {
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding: 0 var(--gutter) 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.34rem;
+}
+
+.tags__dims {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.1rem;
+  align-items: center;
+}
+
+.tagdim {
+  border: 0;
+  background: none;
+  color: var(--ink-faint);
+  font-family: var(--ff-ui);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  padding: 0.16rem 0.42rem;
+  border-radius: var(--r-xs);
+  cursor: pointer;
+  transition: color 0.14s, background 0.14s;
+}
+.tagdim:hover { color: var(--ink-soft); background: var(--surface-alt); }
+.tagdim[aria-pressed="true"] {
+  color: var(--ink);
+  background: var(--line);
+  font-weight: 600;
+}
+
+.tags__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.26rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tags__list::-webkit-scrollbar { display: none; }
+
+.tagchip {
+  flex: 0 0 auto;
+  border: 1px dashed var(--line-strong);
+  background: transparent;
+  color: var(--ink-muted);
+  border-radius: var(--r-pill);
+  padding: 0.1rem 0.56rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+  transition: border-color 0.14s, color 0.14s, background 0.14s;
+}
+.tagchip:hover { border-color: var(--ink-faint); color: var(--ink-soft); }
+.tagchip__n {
+  font-family: var(--ff-mono);
+  font-size: 0.6rem;
+  color: var(--ink-faint);
+}
+.tagchip[aria-pressed="true"] {
+  border-style: solid;
+  border-color: var(--pink-deep);
+  color: var(--pink-deep-ink);
+  background: var(--pink-wash);
+}
+.tagchip[aria-pressed="true"] .tagchip__n { color: var(--pink-deep-ink); opacity: 0.85; }
+
+/* ------------------------------------------------------------------ 主体 */
+.main {
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding: clamp(1.6rem, 4vw, 2.8rem) var(--gutter) 4.5rem;
+}
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.1rem;
+}
+.section-head h2 {
+  font-size: clamp(1.16rem, 2.4vw, 1.34rem);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+/* 章节符号：一颗小色点，简洁且能区分两节 */
+.section-head h2::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--pink);
+  flex: 0 0 auto;
+}
+#large .section-head h2::before { background: var(--lilac); }
+
+.section-head__no {
+  font-family: var(--ff-mono);
+  font-size: 0.68rem;
+  color: var(--ink-faint);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* 三个分区之间的呼吸：一般区在最上、紧接首屏，所以它自己不需要上边距；
+   传统与大型各让一步，避免三节连成一片。 */
+#traditional,
+#large {
+  margin-top: clamp(2.6rem, 6vw, 4.2rem);
+}
+
+/* 传统区的小色点用 --sun（暖黄），与一般的粉、大型的紫拉开；
+   这是唯一的区分信号，不做整节底色。 */
+#traditional .section-head h2::before { background: var(--sun); }
+
+/* -------------------------------------------------- 传统颜文字卡片细节 */
+/* 传统条目是 :) :D <3 这类西文 ASCII 短表情，宽度通常只有 2–6 个半角字符。
+   用一般区的列宽（8.5–11.5rem）会让每张卡片中间空一大片，一屏只能看五行。
+   所以传统区单独用更密的网格：列更窄、卡更矮，一屏能看十几行，
+   更像「一张速查表」，这也更接近这类表情本身的密度。 */
+#traditional .grid {
+  grid-template-columns: repeat(auto-fill, minmax(clamp(5.2rem, 11vw, 7rem), 1fr));
+  gap: 0.45rem;
+}
+/* 传统 mood 的悬停描边用暖黄，与这一节的色点一致 */
+.kao[data-mood="traditional"] { --kao-accent: var(--sun); }
+
+/* 传统条目：极淡的暖色底纹 + 同色系描边 —— 一眼看出「这一节是另一类东西」。
+   不加虚线框、不加角标、不加拟物阴影：全站是极简文字站。 */
+.kao[data-trad="1"] {
+  min-height: 3.5rem;
+  padding: 0.7rem 0.35rem 0.5rem;
+  background: var(--sun-wash);
+  border-color: var(--sun-soft, var(--line));
+}
+.kao[data-trad="1"]:hover {
+  border-color: var(--sun);
+  background: var(--surface);
+}
+/* 宽的传统条目（一行排好几个脸的，宽到 14–33 格）跨两列，
+   否则在窄卡里会被 text-overflow: ellipsis 截断 —— 等于藏内容。 */
+.kao--trad--wide {
+  grid-column: span 2;
+}
+/* 传统条目文本：字距 +0.02em，避免 (  ) 这类括号在比例字体里贴得太紧。
+   字号上调一档补偿半角字符的视觉重量（半角比全角窄，同字号看着会偏小）。 */
+.kao__text--trad {
+  font-size: clamp(0.96rem, 1.7vw, 1.1rem);
+  letter-spacing: 0.02em;
+}
+.kao__text--trad.kao__text--sm {
+  font-size: clamp(0.78rem, 1.35vw, 0.9rem);
+}
+
+/* ------------------------------------------------------- 分区「更多」行 */
+/* 每个分区默认只排 5 行（见 app.js 的 ROW_LIMIT），剩余条目收在网格下面
+   一个「查看更多 N 条」的按钮后面。按钮本身不做成卡片、不加底色 ——
+   它不属于内容，只是内容的进出口，所以只有一条细线和一枚药丸按钮。 */
+.more {
+  display: flex;
+  justify-content: center;
+  margin-top: 1rem;
+}
+.more[hidden] { display: none; }
+
+.more__btn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.32rem 1.1rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 0.81rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.more__btn:hover {
+  border-color: var(--pink);
+  color: var(--pink-deep-ink);
+  background: var(--pink-wash);
+}
+.more__n {
+  font-family: var(--ff-mono);
+  font-size: 0.66rem;
+  color: var(--ink-faint);
+  /* 收起态的按钮没有计数，这里给个方位兜底 */
+  white-space: nowrap;
+}
+.more__btn:hover .more__n { color: var(--ink-muted); }
+
+/* 「收起」比「查看更多」轻一档：用户已经看完，不该再拿一个等重的按钮
+   去抢注意力 —— 它只是把长页收回到 5 行整洁视图的开关。 */
+.more__btn--fold {
+  border-color: var(--line);
+  color: var(--ink-faint);
+  font-size: 0.75rem;
+  padding: 0.26rem 0.9rem;
+}
+
+/* ------------------------------------------------------- 一般颜文字网格 */
+/* 极简卡片：白底 + 1px 描边 + 大留白，悬停只做轻微抬升和描边变色。
+   不做厚阴影、不做歪斜贴纸、不做实色填充。 */
+.grid {
+  display: grid;
+  /* dense 流式填充（本次「优化显示排序，让每行填充满」的实现要点）：
+     传统区有十几条宽到 12–33 半角格的长表情，它们跨两列。默认的
+     row（非 dense）网格遇到跨列卡在行尾放不下时，会把它整体推到下一行，
+     于是上一行右边留下一个整列宽的空洞 —— 视觉上就是「每行没填满」。
+     dense 让后面的窄卡回头补上这个空洞，列数绝不空转。 */
+  grid-auto-flow: dense;
+  grid-template-columns: repeat(auto-fill, minmax(clamp(8.5rem, 19vw, 11.5rem), 1fr));
+  gap: 0.6rem;
+}
+
+.kao {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 5.6rem;
+  padding: 1rem 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.16s, transform 0.16s, box-shadow 0.16s;
+  overflow: hidden;
+}
+.kao:hover {
+  border-color: var(--kao-accent, var(--pink-soft));
+  transform: translateY(-2px);
+  box-shadow: var(--sh-2);
+  z-index: 2;
+}
+.kao:active { transform: translateY(0); box-shadow: none; }
+
+/* 每种情绪给一个很淡的强调色，只用于悬停描边。
+   这是 data-mood 的唯一用途 —— 不做整卡填色，避免回到拟物贴纸。 */
+.kao[data-mood="joy"]      { --kao-accent: var(--sun); }
+.kao[data-mood="love"],
+.kao[data-mood="shy"]      { --kao-accent: var(--pink); }
+.kao[data-mood="sad"],
+.kao[data-mood="cool"]     { --kao-accent: var(--sky); }
+.kao[data-mood="angry"],
+.kao[data-mood="action"]   { --kao-accent: var(--coral); }
+.kao[data-mood="surprise"],
+.kao[data-mood="confused"],
+.kao[data-mood="symbol"]   { --kao-accent: var(--lilac); }
+.kao[data-mood="calm"],
+.kao[data-mood="animal"]   { --kao-accent: var(--mint); }
+
+/* 颜文字本体：等宽、宽度可预测、不换行 */
+.kao__text {
+  font-family: var(--ff-art);
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  font-size: clamp(0.84rem, 1.5vw, 0.96rem);
+  line-height: 1.4;
+  white-space: pre;
+  color: var(--ink);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kao__text--sm { font-size: clamp(0.68rem, 1.2vw, 0.78rem); }
+.kao__text--sym { font-family: var(--ff-sym); }
+
+/* 情绪标签：平时隐藏，悬停淡入。不占视觉重量。 */
+.kao__meta {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.24rem;
+  font-size: 0.6rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+  opacity: 0;
+  transition: opacity 0.18s;
+}
+.kao:hover .kao__meta,
+.kao:focus-visible .kao__meta { opacity: 1; }
+
+/* 悬停时右上角出现的「复制」提示 */
+.kao__copy {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.34rem;
+  font-family: var(--ff-mono);
+  font-size: 0.52rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--pink-deep-ink);
+  opacity: 0;
+  transition: opacity 0.16s;
+  pointer-events: none;
+}
+.kao:hover .kao__copy { opacity: 1; }
+
+/* 复制成功：一条细线从底部掠过一次，比盖印章克制 */
+.kao[data-copied="1"] {
+  border-color: var(--mint);
+}
+.kao[data-copied="1"]::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 2px;
+  background: var(--mint);
+  animation: sweep 0.5s ease-out;
+}
+@keyframes sweep {
+  from { transform: scaleX(0); transform-origin: left; opacity: 1; }
+  to   { transform: scaleX(1); transform-origin: left; opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kao[data-copied="1"]::after { animation: none; opacity: 0.8; }
+  .kao:hover { transform: none; }
+}
+
+/* ------------------------------------------------------- 大型颜文字区 */
+.gallery {
+  display: grid;
+  /* dense 的必要性在这个区最明显：跨列卡的跨度是**按实测自然宽度算出来的**
+     （1–2 列，见 app.js 的 planArtCard），同一批里宽窄混排。非 dense 时
+     一张 2 跨卡放不下就会把行尾空出整列，5 行里可能有两行只填了一半。
+     dense 让后面的单列卡回头补洞，每行都填到底。 */
+  grid-auto-flow: dense;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 21rem), 1fr));
+  gap: 0.8rem;
+}
+
+/* 跨列由 app.js 显式写成 inline grid-column: N / span M（与排布模拟同源）。
+   CSS 里**不再**写 `.art--wide { grid-column: 1 / -1 }` —— 那条兜底规则
+   会盖掉 JS 写的 span（同名的 grid-column 长写比 span 短写优先），
+   结果是每张宽卡都独占整行、右侧空一大片。.art--wide 现在只作为
+   语义标记保留（供测试与样式钩子识别「这是一张跨列卡」）。 */
+
+.art {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  transition: border-color 0.16s, transform 0.16s, box-shadow 0.16s;
+}
+.art:hover {
+  border-color: var(--lilac-soft);
+  transform: translateY(-2px);
+  box-shadow: var(--sh-2);
+}
+
+/* 画布：多行文字画用自然文本流排版，见 app.js 的 buildArtText()。
+   一个 <pre> 就够 —— 作者的换行与空格原样保留，字符宽度交给字体自己。 */
+.art__stage {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.2rem 0.8rem;
+  min-height: 7.5rem;
+  overflow: auto;
+  background: var(--surface-alt);
+  scrollbar-width: thin;
+  cursor: pointer;
+}
+
+.art__text {
+  font-family: var(--ff-art);
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  /* 字号由 JS 按作品实测自然宽度算出来写进 --fit，见 app.js 的 planArtCard()。
+     这里给一个兜底值，保证 JS 失效时画面仍可读。 */
+  font-size: var(--fit, 0.72rem);
+  /* 1.5 是这些文字画作者默认的行距：他们按「一行一个字高」数行数，
+     行高太小换行会互相压，太大整幅画会散开。 */
+  line-height: 1.5;
+  margin: 0;
+  color: var(--ink);
+  white-space: pre;
+  width: max-content;
+  max-width: 100%;
+  /* 偏远字符的字体回退常带出上下留白，别让它把行距撑乱 */
+  overflow-wrap: normal;
+}
+
+.art__text--sm { font-size: 0.58rem; }
+.art__text--sym { font-family: var(--ff-sym); }
+
+/*
+ * 不设「盲文专用等宽」特例。
+ *
+ * 盲文点阵画原本用 U+2800–U+28FF 当像素拼图，等宽字体里空与点同宽
+ * （都是 0.5859em）所以能拼出正方形点阵。但本站的颜文字是给人复制去发
+ * 消息的：收信人手机上不会有 Cascadia Mono，只会用系统比例字体，那时
+ * U+2800 是 0.6509em、点阵字是 0.7534em（差 16%），画必然比这里更松散。
+ * 在自己机器上把它修成完美网格，等于让站内成为唯一正确的环境 ——
+ * 所见非所发，正是要避免的事。所以全站统一 --ff-art，本站看到的松弛
+ * 就是收信人看到的松弛。
+ */
+@media (max-width: 640px) {
+  /* 手机上再压一档；--fit 由 JS 算，这里只是把上限压低 */
+  .art__text { font-size: min(var(--fit, 0.58rem), 0.58rem); }
+  .art__text--sm { font-size: min(var(--fit, 0.48rem), 0.48rem); }
+}
+
+.art__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.art__title {
+  font-size: 0.84rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.art__dims {
+  font-family: var(--ff-mono);
+  font-size: 0.62rem;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.art__copy {
+  margin-left: auto;
+  flex: 0 0 auto;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  border-radius: var(--r-pill);
+  padding: 0.14rem 0.62rem;
+  font-size: 0.71rem;
+  font-weight: 500;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.art__copy:hover { border-color: var(--pink); color: var(--pink-deep-ink); }
+.art[data-copied="1"] .art__copy {
+  border-color: var(--mint);
+  color: var(--mint-ink);
+}
+
+/* ------------------------------------------------------------------ 空态 */
+.empty {
+  padding: 4rem 1rem;
+  text-align: center;
+  color: var(--ink-soft);
+}
+.empty__art {
+  font-family: var(--ff-art);
+  font-size: 1.4rem;
+  white-space: pre;
+  color: var(--ink-faint);
+  margin-bottom: 0.9rem;
+  display: block;
+  line-height: 1.3;
+}
+.empty__hint { font-size: 0.82rem; margin-top: 0.3rem; color: var(--ink-faint); }
+.empty button {
+  margin-top: 1.1rem;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--ink-soft);
+  font-weight: 500;
+  padding: 0.26rem 0.95rem;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  font-size: 0.81rem;
+  transition: border-color 0.15s, color 0.15s;
+}
+.empty button:hover { border-color: var(--pink); color: var(--pink-deep-ink); }
+
+/* ------------------------------------------------------------------ 页脚 */
+.footer {
+  border-top: 1px solid var(--line);
+  padding: clamp(1.8rem, 4vw, 2.6rem) var(--gutter);
+}
+.footer__inner {
+  max-width: var(--measure);
+  margin-inline: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.2rem 2.2rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  font-size: 0.77rem;
+  color: var(--ink-faint);
+  line-height: 1.9;
+}
+.footer__icon {
+  font-family: var(--ff-sym);
+  color: var(--pink-deep-ink);
+  font-size: 0.86rem;
+  white-space: nowrap;
+  margin-bottom: 0.25rem;
+}
+/* 页脚只剩品牌与分区跳转。原先这里还有一段「全站不含图像素材」的说明，
+   按需求删掉了 —— 那句话解释的是实现手段，不是访客需要的信息。 */
+.footer__links { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.footer__links a {
+  text-decoration: none;
+  color: var(--ink-muted);
+  padding: 0.16rem 0.6rem;
+  border-radius: var(--r-pill);
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.footer__links a:hover { background: var(--well); color: var(--ink); }
+
+/* ------------------------------------------------------------------ toast */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.4rem;
+  transform: translate(-50%, 1.2rem);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  max-width: min(92vw, 32rem);
+  padding: 0.5rem 0.85rem;
+  background: var(--ink);
+  color: var(--bg);
+  border-radius: var(--r-pill);
+  font-size: 0.79rem;
+  box-shadow: var(--sh-3);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s, transform 0.2s;
+}
+.toast[data-show="1"] {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+.toast__label {
+  font-size: 0.71rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--pink-soft);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.toast__text {
+  font-family: var(--ff-art);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 21rem;
+  flex: 0 1 auto;
+}
+
+/* ------------------------------------------------------------ 打印友好 */
+@media print {
+  .masthead, .toolbar, .toast, .art__copy, .hero, .moods { display: none; }
+  body { background: #fff; }
+  .kao, .art { border-color: #ddd; box-shadow: none; }
+  .art { break-inside: avoid; }
+}
