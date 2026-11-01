@@ -698,31 +698,54 @@
   var SHARD_MANIFEST = 'shards/manifest.json';
   var shardState = { started: false, done: false, failed: false };
 
-  /** 一个极小的顺序加载器：把若干同源 JS 分片按序 load 进来。
+  /** 一个极小的分片加载器：把若干同源 JS 分片 load 进来。
    *  为什么用 <script> 而不是 fetch：
    *   分片就是 JS 文件（window.WZY_SHARD = {...}），用 script 标签最省事，
    *    也天然走浏览器的静态资源缓存；fetch 还要自己 eval，多一层破坏面。
-   *  为什么串行：分片顺序决定数组拼接顺序，而顺序影响渲染顺序与 E2E 核对，
-   *    并行加载完成顺序不确定，会让结果不可复现。 */
+   *
+   *  为什么并行加载、但合并仍然有序：
+   *   原来这里是**串行**的（一个加载完再下一个）。串行在 1907 条时没问题
+   *   （6 个分片），但语料扩到 5280 条后分片变成 14 个，实测线上补载
+   *   要 **13.1 秒**（14 个请求串行，每个 0.5–1.8s）。用户看到的是
+   *   「点展开要等十几秒」，首屏之后一直有卡顿。
+   *   改成并行发起后，14 个请求同时在网络上跑，总耗时 ≈ 最慢那一个
+   *   （实测约 1.8s），比串行快一个数量级。
+   *
+   *   并行会带来「完成顺序不确定」的问题 —— 而顺序会影响数组拼接顺序，
+   *   进而影响渲染顺序与 E2E 核对。解决办法是**按名字把数据攒起来，
+   *   最后按 manifest 给的原始顺序合并**（见 mergeShard 的调用处）：
+   *   下载并发，数据有序，结果可复现。 */
   function loadShards(names, onDone, onFail) {
-    var i = 0;
-    function next() {
-      if (i >= names.length) { onDone(); return; }
-      var name = names[i++];
+    if (!names.length) { onDone(); return; }
+    var loaded = new Array(names.length);
+    var remaining = names.length;
+    var failed = false;
+
+    function settle(i, name) {
+      if (failed) return;
+      remaining--;
+      if (remaining <= 0) {
+        if (failed) onFail(name); else onDone(loaded);
+      }
+    }
+
+    names.forEach(function (name, i) {
       var s = document.createElement('script');
       s.src = 'shards/' + name + '.js';
       // 分片脚本本体是 `window.WZY_SHARD = {...}`，load 事件时它已经在全局了。
-      // 必须先把数据并进 GENERAL/LARGE，再清掉全局变量 —— 反过来的话
+      // 必须先把数据存下来，再清掉全局变量 —— 反过来的话
       // 这一块的数据就丢了（脚本不会重跑）。
       s.onload = function () {
-        mergeShard(window.WZY_SHARD);
+        loaded[i] = window.WZY_SHARD;
         window.WZY_SHARD = null;
-        next();
+        settle(i, name);
       };
-      s.onerror = function () { onFail(name); };
+      s.onerror = function () {
+        failed = true;
+        settle(i, name);
+      };
       document.head.appendChild(s);
-    }
-    next();
+    });
   }
 
   /**
@@ -749,7 +772,11 @@
         return;
       }
       var names = (m.pages || []).map(function (p) { return p.name; });
-      loadShards(names, function () {
+      loadShards(names, function (loaded) {
+        // 分片是并行下载的，完成顺序不确定 —— 但**合并顺序必须确定**，
+        // 否则数组顺序会随网络快慢抖动，渲染顺序与 E2E 核对都不可复现。
+        // loaded[i] 对应 names[i]，按索引顺序合并即可。
+        (loaded || []).forEach(function (sh) { mergeShard(sh); });
         shardState.done = true;
         // 补齐后必须重建两类筛选 UI，否则它们停留在「只统计 boot 那几十条」的状态：
         //   1) 标签：recountTags 重算计数，buildTags 重建面板
