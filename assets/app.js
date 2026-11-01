@@ -868,6 +868,25 @@
     return true;
   }
 
+  /*
+   * tier 降权系数（用户要求 m00583「点阵画权重低、图画类颜文字权重低」）。
+   *
+   * 与构建期 build/kaomoji-db.mjs 的 TIER_WEIGHTS 完全一致 —— 两处必须同值，
+   * 否则浏览器端检索顺序会和构建期不一致。
+   *
+   *   facey  100  表情类：有五官的造型，用户最常找的形态，不降权
+   *   picture  70  字符图片类：风景、器物、纹样、纯字符画，往下沉
+   *   pixel   45  盲文点阵画：固定占满整行，视觉重量最大，沉得最狠
+   *
+   * 没标 tier 的一般条目按满分算。
+   */
+  var TIER_WEIGHTS = { facey: 100, picture: 70, pixel: 45 };
+
+  function tierWeight(tier) {
+    var w = TIER_WEIGHTS[tier];
+    return typeof w === 'number' ? w : 100;
+  }
+
   /**
    * 跑一次检索，返回 id → 命中信息。
    * 与构建期 runtimeSearch()（build/kaomoji-db.mjs）逐行对应。
@@ -884,9 +903,17 @@
     var terms = [q];
     if (canon && canon !== q) terms.push(canon);
 
-    function bump(id, score) {
+    // tier 降权：点阵画与字符图片类的命中分打折（用户要求 m00583）。
+    // 系数与构建期完全一致（build/kaomoji-db.mjs 的 TIER_WEIGHTS）：
+    // facey 100 / picture 70 / pixel 45。
+    // 权重对同一条是常数，所以「取各层最高分」和「每层都打折」等价 ——
+    // 在 bump 里直接打折即可，不必先收集最高分再乘。
+    // 没标 tier 的一般条目按满分算（tierWeight 找不到就返回 100）。
+    function bump(id, score, tier) {
+      var w = tierWeight(tier);
+      var weighted = Math.round((score * w) / 100);
       var cur = out.get(id);
-      if (!cur || score > cur.score) out.set(id, { score: score });
+      if (!cur || weighted > cur.score) out.set(id, { score: weighted });
     }
 
     var i, j, t, item, key, sk, tk;
@@ -896,20 +923,20 @@
       // 1) 字面子串
       for (j = 0; j < terms.length; j++) {
         t = terms[j];
-        if (key.indexOf(t) !== -1) bump(item.id, t.length >= 3 ? 900 : 880);
+        if (key.indexOf(t) !== -1) bump(item.id, t.length >= 3 ? 900 : 880, item.tier);
       }
       // 2) 骨架子串
       if (useSkel) {
         sk = SKELS[item.id] || '';
-        if (sk.indexOf(skel) !== -1) bump(item.id, 760);
+        if (sk.indexOf(skel) !== -1) bump(item.id, 760, item.tier);
       }
       // 3) 语义
-      if (item.tags && item.tags.indexOf(canon) !== -1) bump(item.id, 700);
-      if (item.moodLabel && searchKey(item.moodLabel) === canon) bump(item.id, 650);
+      if (item.tags && item.tags.indexOf(canon) !== -1) bump(item.id, 700, item.tier);
+      if (item.moodLabel && searchKey(item.moodLabel) === canon) bump(item.id, 650, item.tier);
       if (item.title) {
         tk = searchKey(item.title);
         for (j = 0; j < terms.length; j++) {
-          if (tk.indexOf(terms[j]) !== -1) bump(item.id, 800);
+          if (tk.indexOf(terms[j]) !== -1) bump(item.id, 800, item.tier);
         }
       }
     }
@@ -1175,12 +1202,54 @@
     }
     for (i = 0; i < LARGE.length; i++) if (matches(LARGE[i], true)) ls.push(LARGE[i]);
 
-    // 像素画（盲文点阵拼的文字画）统一排到大型区末尾。
-    // 它们固定占满整行、视觉重量远大于普通行画；
-    // 若按语料文件顺序混在开头，一进大型区先看到一片点阵，后面的行画就被压住了。
-    // sort 是稳定的，所以两类内部都保持原有顺序。
+    /*
+     * 检索态：按命中分从高到低排（用户要求 m00583「点阵画权重低、图画类颜文字权重低」）。
+     *
+     * 没有搜索词时保持语料原序 —— 那个顺序就是构建期写死的稳定顺序，
+     * 翻页、复制、URL 哈希都依赖它稳定。
+     *
+     * 有搜索词时必须换成按 score 排：score 才是「这条有多像用户要找的东西」的
+     * 量化，tier 降权就落在 score 上。如果不排序，降权改了但结果顺序不变，
+     * 用户看不出任何区别 —— 这条改动就白做了。
+     *
+     * sort 是稳定的，所以同分的条目仍保持语料原序，不会出现「每次刷新顺序都抖」。
+     */
+    var scoreOf = null;
+    if (state.q) {
+      var hitMap = hits();
+      scoreOf = function (item) {
+        var h = hitMap && hitMap.get(item.id);
+        return h ? h.score : 0;
+      };
+      gs.sort(function (a, b) { return scoreOf(b) - scoreOf(a); });
+      ts.sort(function (a, b) { return scoreOf(b) - scoreOf(a); });
+    }
+
+    // 大型区分三段排序：表情类 → 字符图片类 → 盲文点阵像素画。
+    //
+    // 用户要求（m00306）：「表情在上，字符图片在下」。
+    // 大型区里混着两类观感完全不同的东西：一是有五官的拟人/动物造型
+    // （猫脸、兔子、幽灵、外星人），二是风景/物品/纯字符画（山、岛、花纹、武器）。
+    // 进大型区第一眼应该看到「表情」，往下才是「图片」。
+    //
+    // 像素画（盲文点阵拼的文字画）再排在最后：它们固定占满整行，
+    // 视觉重量远大于普通行画，混在开头会把后面的行画压住。
+    //
+    // facey / pixel 都由构建期算好（build/export-runtime.mjs），前端不猜字符含义。
+    // sort 是稳定的，所以每一段内部都保持语料原有顺序。
+    //
+    // 检索态下这段排序是**次级**键：上面已经按 score 排过一遍，这里再排一次
+    // 会把 score 的顺序完全打乱。所以检索态下改成「score 降序，同分再按三段」，
+    // 非检索态才用纯三段排序。
     ls.sort(function (a, b) {
-      return (a.pixel ? 1 : 0) - (b.pixel ? 1 : 0);
+      if (state.q) {
+        var sa = scoreOf(a);
+        var sb = scoreOf(b);
+        if (sa !== sb) return sb - sa;
+      }
+      var ra = a.pixel ? 2 : (a.facey ? 0 : 1);
+      var rb = b.pixel ? 2 : (b.facey ? 0 : 1);
+      return ra - rb;
     });
 
     // 一般 / 传统 / 大型，三区各自的 5 行 + 更多
@@ -1231,7 +1300,10 @@
     allBtn.textContent = '全部';
     var n = document.createElement('span');
     n.className = 'chip__n';
-    n.textContent = GENERAL.length + LARGE.length;
+    /* 与顶栏 updateStats() 同一口径：分片模式下首屏只有 boot 那 110 条，
+       GENERAL.length + LARGE.length 只是「当前已到条数」，不是全站收录量。
+       counts 是构建期算好的全量值，所以这里优先用它（同 updateStats 的注释）。 */
+    n.textContent = (META.counts && META.counts.total) || (GENERAL.length + LARGE.length);
     allBtn.appendChild(n);
     moodsEl.appendChild(allBtn);
 
@@ -1531,7 +1603,15 @@
   // ---------------------------------------------------------------- 启动
   // 首屏的大标题和统计药丸已按需求移除，现在唯一的统计出口是顶栏那一行。
   function updateStats() {
-    var total = GENERAL.length + LARGE.length;
+    /* 收录总数必须取**构建期全量**（META.counts.total），不能用
+       GENERAL.length + LARGE.length —— 分片模式下后者在首屏只是 boot
+       那 110 条，要等 loadRemaining 补齐才变成全量。以前这里直接数数组，
+       于是顶栏在整次会话里一直显示「收录 110 条」，而真实是 4451 条。
+       （app.js 上方 loadRemaining 的注释第 2 条就写明了 counts 是构建期
+       全量值、不是「当前已到条数」，这里是同一个约束的另一处落点。）
+
+       兜底：整包模式 / 老数据没有 counts 时退回数组长度，行为不变。 */
+    var total = (META.counts && META.counts.total) || (GENERAL.length + LARGE.length);
     var elC = document.getElementById('mastheadCount');
     // 传统条目已经算在 GENERAL 里，所以总数不必再加一次
     if (elC) elC.textContent = '收录 ' + total + ' 条';
