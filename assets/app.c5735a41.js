@@ -845,9 +845,18 @@
   /** 确保检索索引到位。索引单独一个分片，只有搜索时才拉。 */
   var indexState = { started: false, done: false };
   function ensureIndex(cb) {
+    // 已加载完：立刻回调（不能只 return —— 那样调用方的 render 永远不会触发）
     if (!NEEDS_MORE || indexState.done) { if (cb) cb(); return; }
-    if (indexState.started) { return; }
+    // 正在加载中：把回调排队，加载完统一执行。
+    // 早期这里写的是「return，不保存 cb」—— 于是「首屏输入时 ensureFull 与
+    // ensureIndex 并发」这种最常见的路径上，排队的调用方永远等不到回调，
+    // 页面就停在「无结果」。必须排队。
+    if (indexState.started) {
+      if (cb) indexState.cbs.push(cb);
+      return;
+    }
     indexState.started = true;
+    indexState.cbs = cb ? [cb] : [];
     var s = document.createElement('script');
     s.src = 'shards/index.js';
     s.onload = function () {
@@ -860,7 +869,17 @@
       }
       window.WZY_INDEX = null;
       indexState.done = true;
-      if (cb) cb();
+      /* 关键：索引到位后必须**清掉检索缓存**。
+         hitCache 按查询串缓存结果，若首次搜索发生在索引加载完成之前，
+         缓存里存的是「用空索引算出的空结果」，而 q 没变 → 后续 render
+         一直命中这个空缓存，表现为「明明有数据却搜不到」。
+         实测就是 >_< 搜不到（DB 里 24 条、keys 里也有），而 猫 能搜到 ——
+         差别只在索引是否恰好先加载完，是个竞态。 */
+      hitCache.q = null;
+      hitCache.map = null;
+      var cbs = indexState.cbs || [];
+      indexState.cbs = [];
+      for (var i = 0; i < cbs.length; i++) { try { cbs[i](); } catch (e) {} }
     };
     s.onerror = function () { indexState.done = true; if (cb) cb(); };
     document.head.appendChild(s);
@@ -896,18 +915,20 @@
   }
 
   /*
-   * tier 降权系数（用户要求 m00583「点阵画权重低、图画类颜文字权重低」）。
+   * tier 降权系数（用户要求 m00583「点阵画权重低、图画类颜文字权重低」
+   * + 2026-11-02「有身体/在做动作的角色造型画排最上面，单纯的字符画降低权重」）。
    *
    * 与构建期 build/kaomoji-db.mjs 的 TIER_WEIGHTS 完全一致 —— 两处必须同值，
    * 否则浏览器端检索顺序会和构建期不一致。
    *
-   *   facey  100  表情类：有五官的造型，用户最常找的形态，不降权
+   *   figure  100  角色动作造型画：有五官且有身体/肢体/道具，用户要求置顶，不降权
+   *   facey    85  只有头/胸像的表情造型：仍是「表情」，但视觉层次低于 figure
    *   picture  70  字符图片类：风景、器物、纹样、纯字符画，往下沉
-   *   pixel   45  盲文点阵画：固定占满整行，视觉重量最大，沉得最狠
+   *   pixel    45  盲文点阵画：固定占满整行，视觉重量最大，沉得最狠
    *
    * 没标 tier 的一般条目按满分算。
    */
-  var TIER_WEIGHTS = { facey: 100, picture: 70, pixel: 45 };
+  var TIER_WEIGHTS = { figure: 100, facey: 85, picture: 70, pixel: 45 };
 
   function tierWeight(tier) {
     var w = TIER_WEIGHTS[tier];
@@ -932,7 +953,7 @@
 
     // tier 降权：点阵画与字符图片类的命中分打折（用户要求 m00583）。
     // 系数与构建期完全一致（build/kaomoji-db.mjs 的 TIER_WEIGHTS）：
-    // facey 100 / picture 70 / pixel 45。
+    // figure 100 / facey 85 / picture 70 / pixel 45。
     // 权重对同一条是常数，所以「取各层最高分」和「每层都打折」等价 ——
     // 在 bump 里直接打折即可，不必先收集最高分再乘。
     // 没标 tier 的一般条目按满分算（tierWeight 找不到就返回 100）。
@@ -1252,30 +1273,41 @@
       ts.sort(function (a, b) { return scoreOf(b) - scoreOf(a); });
     }
 
-    // 大型区分三段排序：表情类 → 字符图片类 → 盲文点阵像素画。
+    // 大型区四段排序：角色动作造型画(figure) → 表情造型(facey) → 字符图片(picture)
+    // → 盲文点阵像素画(pixel)。
     //
-    // 用户要求（m00306）：「表情在上，字符图片在下」。
-    // 大型区里混着两类观感完全不同的东西：一是有五官的拟人/动物造型
-    // （猫脸、兔子、幽灵、外星人），二是风景/物品/纯字符画（山、岛、花纹、武器）。
-    // 进大型区第一眼应该看到「表情」，往下才是「图片」。
+    // 用户要求（m00306 + 2026-11-02）：
+    //   「表情在上，字符图片在下」
+    //   「有身体/在做动作的角色造型画在最上面，各种单纯的字符画降低权重」
+    //
+    // 2026-11-02 从三级升为四级：原来的三级只分「有脸 / 没脸」，于是
+    // 「火箭炮少女」「搬砖的猫」这类**有身体、有肢体、在做动作**的角色画
+    // 和「猫脸、牛之一」这类只有头/胸像的造型挤在同一段。现在拆开：
+    //   figure = 有五官 + 画幅明显高于一个头（有身体/肢体/道具）
+    //   facey  = 只有头/胸像的表情造型
     //
     // 像素画（盲文点阵拼的文字画）再排在最后：它们固定占满整行，
     // 视觉重量远大于普通行画，混在开头会把后面的行画压住。
     //
-    // facey / pixel 都由构建期算好（build/export-runtime.mjs），前端不猜字符含义。
+    // 四个标记（figure / facey / pixel）与 tier 字符串都由构建期算好
+    // （build/export-runtime.mjs），前端不猜字符含义。
     // sort 是稳定的，所以每一段内部都保持语料原有顺序。
     //
     // 检索态下这段排序是**次级**键：上面已经按 score 排过一遍，这里再排一次
-    // 会把 score 的顺序完全打乱。所以检索态下改成「score 降序，同分再按三段」，
-    // 非检索态才用纯三段排序。
+    // 会把 score 的顺序完全打乱。所以检索态下改成「score 降序，同分再按四段」，
+    // 非检索态才用纯四段排序。
+    //
+    // 向后兼容：老 payload 没有 figure 标记时 a.figure 为 undefined（falsy），
+    // 于是 facey 仍落到 1、picture 落到 2，行为与三级时代一致 ——
+    // 不会因为缺字段把 facey 误降到 picture 段。
     ls.sort(function (a, b) {
       if (state.q) {
         var sa = scoreOf(a);
         var sb = scoreOf(b);
         if (sa !== sb) return sb - sa;
       }
-      var ra = a.pixel ? 2 : (a.facey ? 0 : 1);
-      var rb = b.pixel ? 2 : (b.facey ? 0 : 1);
+      var ra = a.pixel ? 3 : (a.figure ? 0 : (a.facey ? 1 : 2));
+      var rb = b.pixel ? 3 : (b.figure ? 0 : (b.facey ? 1 : 2));
       return ra - rb;
     });
 
@@ -1644,6 +1676,75 @@
     if (elC) elC.textContent = '收录 ' + total + ' 条';
   }
 
+  // ------------------------------------------------ 移动端下滑收起筛选（2026-11-02）
+  /*
+   * 用户要求：「移动端网页下滑时，只保留顶栏和搜索框（即所有筛选 tag 都随着
+   * 下滑隐藏，包含『全部、传统、一般、大型』），和顶部动画区一致」。
+   *
+   * 口径（一条都不能少）：
+   *   · 顶栏（.masthead，品牌 + 收录数）**始终留在 sticky 顶**；
+   *   · 搜索框（迁移到 .toolbar 的搜索行）**始终可见、可聚焦**；
+   *   · 收起的是三组筛选：.segmented（全部/传统/一般/大型）、.moods（情绪）、
+   *     .tags（标签维度+词条），以及结果计数（它是筛选的反馈，跟着一起走）；
+   *   · 顶部动画区（.hero）本来就不是 sticky，下滑时自然滚出视口 ——
+   *     它不是被这段逻辑收起的，只是「一起消失」。
+   *
+   * 实现要点：
+   *   1. 只改 .toolbar 的一个状态属性（data-collapsed="1"），CSS 据此收起子组；
+   *      不给每个元素单独设 hidden —— 单一真值来源，恢复时不会漏。
+   *   2. 只在移动端生效（matchMedia('(max-width: 820px)')）。桌面端行为完全不变。
+   *   3. 双阈值迟滞（滚过 120 收起、回到 60 以内展开），避免边界抖动。
+   *   4. 滚动监听用 { passive: true } + requestAnimationFrame 合并，
+   *      不在 scroll 回调里直接改样式/触发布局。
+   *   5. 收起态的子组会 display:none，可聚焦按钮随容器一起离开 tab 序
+   *      （无障碍要求：键盘用户不会掉进看不见的控件）。
+   *   6. prefers-reduced-motion 下不做过渡动画（CSS 侧处理），状态切换照旧。
+   */
+  function initMobileCollapse() {
+    var toolbar = document.querySelector('.toolbar');
+    if (!toolbar || !window.matchMedia) return;
+
+    var mq = window.matchMedia('(max-width: 820px)');
+    var COLLAPSE_AT = 120;   // 下滑超过这个像素就收起
+    var RESTORE_AT = 60;     // 回到这个像素以内就展开（迟滞区间 60）
+    var queued = false;
+    var collapsed = false;
+
+    function apply(next) {
+      if (next === collapsed) return;
+      collapsed = next;
+      if (next) toolbar.setAttribute('data-collapsed', '1');
+      else toolbar.removeAttribute('data-collapsed');
+    }
+
+    function evaluate() {
+      queued = false;
+      if (!mq.matches) {
+        // 桌面端：一律展开，且不留状态属性（否则从窄屏转回宽屏会残留收起态）
+        apply(false);
+        return;
+      }
+      var y = window.pageYOffset || document.documentElement.scrollTop || 0;
+      if (!collapsed && y > COLLAPSE_AT) apply(true);
+      else if (collapsed && y < RESTORE_AT) apply(false);
+    }
+
+    function onScroll() {
+      if (queued) return;
+      queued = true;
+      if (window.requestAnimationFrame) window.requestAnimationFrame(evaluate);
+      else evaluate();
+    }
+
+    window.addEventListener('scroll', onScroll, { passive: true });
+
+    // 视口跨过 820px 断点时立刻归位（否则窄屏收起后转宽屏会留着收起态）
+    if (mq.addEventListener) mq.addEventListener('change', evaluate);
+    else if (mq.addListener) mq.addListener(evaluate);
+
+    evaluate();
+  }
+
   function init() {
     readHash();
     buildRiver();
@@ -1661,6 +1762,8 @@
     wireControls();
     updateStats();
     render();
+    // 移动端下滑收起筛选（只改 .toolbar 的 data-collapsed，桌面端不受影响）
+    initMobileCollapse();
 
     /* ---- 分片补载 ----
        首屏先用 boot 那几十条渲染（用户立刻看到内容，不用等网络），

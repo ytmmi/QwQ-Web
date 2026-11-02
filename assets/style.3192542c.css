@@ -399,6 +399,56 @@ a { color: inherit; }
   border-bottom: 1px solid var(--line);
 }
 
+/* 移动端下滑收起筛选（2026-11-02）
+ *
+ * 用户要求：「移动端网页下滑时，只保留顶栏和搜索框（即所有筛选 tag 都随着
+ * 下滑隐藏，包含『全部、传统、一般、大型』），和顶部动画区一致」。
+ *
+ * 做法：JS 只在 .toolbar 上打一个 data-collapsed="1"，这里据此收起三组筛选
+ * （.segmented / .moods / .tags）与结果计数。搜索行始终保留。
+ *
+ * 为什么是 display:none 而不是「高度归零 + 保留元素」：
+ *   · 收起时 sticky 条的高度必须真的变小，否则下滑后顶栏下面会留一段空白，
+ *     内容看起来没动但实际被挡住；
+ *   · display:none 会把内部可聚焦按钮一起移出 tab 序 —— 键盘用户不会掉进
+ *     看不见的控件里（保留高度但 opacity:0 就会）。
+ *
+ * 只在 ≤820px 生效：桌面端这一整套规则不参与，行为与改动前完全一致。
+ */
+@media (max-width: 820px) {
+  /* 收起态：三组筛选 + 结果计数整体隐藏 */
+  .toolbar[data-collapsed="1"] .segmented,
+  .toolbar[data-collapsed="1"] .moods,
+  .toolbar[data-collapsed="1"] .tags,
+  .toolbar[data-collapsed="1"] .toolbar__right {
+    display: none;
+  }
+
+  /* 收起态下搜索行的上下内边距收紧，让 sticky 条只剩一行的高度。
+     用 padding 变化而不是缩放，是因为搜索框本身要保持原有可点面积。 */
+  .toolbar[data-collapsed="1"] .toolbar__inner {
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+  }
+
+  /* 展开/收起过渡：只过渡内边距这类开销低的属性；
+     三组筛选是 display 切换，做不了 transition（也没必要做）。 */
+  .toolbar__inner {
+    transition: padding 0.18s ease;
+  }
+
+  /* 锚点跳转时给顶栏让出位置，避免分区标题被 sticky 条盖住。
+     收起态下 sticky 条变矮，用同一套 scroll-margin 仍然安全。 */
+  .main section {
+    scroll-margin-top: calc(var(--mast-h) + 4.6rem);
+  }
+}
+
+@media (max-width: 820px) and (prefers-reduced-motion: reduce) {
+  .toolbar__inner { transition: none; }
+}
+
+
 .toolbar__inner {
   max-width: var(--measure);
   margin-inline: auto;
