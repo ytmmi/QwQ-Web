@@ -793,6 +793,13 @@
         try { document.dispatchEvent(new CustomEvent('wzy-ready')); } catch (e) {}
         // 补齐后重渲染一次：首屏只画了 boot 那几十条，现在才是全量
         render();
+        /* 面板重建后**必须补量一次滑出高度**（2026-11-02）：
+           boot 态的标签面板只有几个词条，全量补载后会多出很多标签，
+           .tags 的自然高度从 ~69px 涨到 ~98px。若不补量，
+           CSS 的 --collapse-h 还是旧值（偏小），收起时 max-height
+           已经小于内容高度 → 一上来就被裁，观感是「突然跳一下再走」。
+           这里调 remeasureCollapse()（在 initMobileCollapse 里暴露）。 */
+        remeasureCollapse();
       }, function (bad) {
         shardState.failed = true;
         if (done) done();
@@ -1680,26 +1687,46 @@
   /*
    * 用户要求：「移动端网页下滑时，只保留顶栏和搜索框（即所有筛选 tag 都随着
    * 下滑隐藏，包含『全部、传统、一般、大型』），和顶部动画区一致」。
+   * 修订要求（2026-11-02 晚）：**不是突然消失，要和顶部颜文字动画区一样滑动隐藏。**
    *
    * 口径（一条都不能少）：
    *   · 顶栏（.masthead，品牌 + 收录数）**始终留在 sticky 顶**；
-   *   · 搜索框（迁移到 .toolbar 的搜索行）**始终可见、可聚焦**；
-   *   · 收起的是三组筛选：.segmented（全部/传统/一般/大型）、.moods（情绪）、
-   *     .tags（标签维度+词条），以及结果计数（它是筛选的反馈，跟着一起走）；
+   *   · 搜索框（.toolbar 的搜索行）**始终可见、可聚焦**；
+   *   · 滑出的是四组筛选：.segmented（全部/传统/一般/大型）、.toolbar__right
+   *     （结果计数）、.moods（情绪）、.tags（标签维度+词条）；
    *   · 顶部动画区（.hero）本来就不是 sticky，下滑时自然滚出视口 ——
-   *     它不是被这段逻辑收起的，只是「一起消失」。
+   *     它不是被这段逻辑收起的，只是「一起消失」；观感要与之一致。
    *
-   * 实现要点：
-   *   1. 只改 .toolbar 的一个状态属性（data-collapsed="1"），CSS 据此收起子组；
-   *      不给每个元素单独设 hidden —— 单一真值来源，恢复时不会漏。
-   *   2. 只在移动端生效（matchMedia('(max-width: 820px)')）。桌面端行为完全不变。
-   *   3. 双阈值迟滞（滚过 120 收起、回到 60 以内展开），避免边界抖动。
-   *   4. 滚动监听用 { passive: true } + requestAnimationFrame 合并，
-   *      不在 scroll 回调里直接改样式/触发布局。
-   *   5. 收起态的子组会 display:none，可聚焦按钮随容器一起离开 tab 序
-   *      （无障碍要求：键盘用户不会掉进看不见的控件）。
-   *   6. prefers-reduced-motion 下不做过渡动画（CSS 侧处理），状态切换照旧。
+   * 本版修订的关键：上一版在阈值处直接切 display:none，是**突变**；
+   * 现在改成**平滑滑出**。两个层面配合：
+   *   · CSS（style.css 的同名小节）负责形态：max-height + opacity + translateY
+   *     过渡，向上滑出并真正让出高度；
+   *   · JS 负责两件事：① 触发时机（滚动越过分档阈值后进入收起态）；
+   *     ② **实测各组自然高度并写进 --collapse-h**（见下方 measureGroups 注释，
+   *     这是「第一帧就开始收」而不是「先卡住再收」的前提）。
+   *
+   * 为什么不逐像素驱动动画（把 scrollY 直接映射成 translateY）：
+   *   sticky 元素的高度变化会反过来改变 scrollY 的可用范围，逐像素驱动会
+   *   形成「越收越触发、越触发越收」的反馈环，表现为抖动或跳一下。
+   *   所以这里用**状态切换 + CSS 过渡**：一次切换、过渡自己跑完，稳定可预测。
+   *   阈值带迟滞（120 收 / 60 展），避免边界来回切。
+   *
+   * 其余约束不变：
+   *   · 只在移动端生效（≤820px），桌面端行为完全不变；
+   *   · { passive: true } + requestAnimationFrame 合并，不在 scroll 回调里改样式；
+   *   · prefers-reduced-motion 下不做过渡（CSS 侧 transition:none），状态照切；
+   *   · 收起后按钮离开 tab 序由 CSS 的 visibility 负责（见 style.css 注释）。
    */
+  var collapseCtl = null;   // 暴露给 loadRemaining 的补量入口
+
+  /**
+   * 数据补载后面板会重建（标签变多、情绪计数变全），自然高度随之改变。
+   * 调用它让收起动画用新的高度，否则 --collapse-h 偏小会「一上来就被裁」。
+   */
+  function remeasureCollapse() {
+    if (collapseCtl) collapseCtl();
+  }
+
   function initMobileCollapse() {
     var toolbar = document.querySelector('.toolbar');
     if (!toolbar || !window.matchMedia) return;
@@ -1710,11 +1737,36 @@
     var queued = false;
     var collapsed = false;
 
+    /* 参与滑出的四组。每组在展开态量一次自然高度，写进 style 里的
+       --collapse-h（CSS 的 max-height 读它）。
+       为什么必须实测、不能写死一个「够大的上限」：max-height 过渡是
+
+       「从设定值线性插值到 0」，而元素实际高度 = min(内容高, max-height)。
+       若设定值远大于内容高（例如 240 vs 实测 69），那 max-height 从 240
+       降到 69 的这 71% 时长里，实际高度一点都没变 —— 观感是「先卡住、
+       最后啪一下收走」，正是这次要修的毛病。给准确实测值，收缩才从第一帧开始。 */
+    var GROUPS = ['.segmented', '.toolbar__right', '.moods', '.tags'];
+
+    function measureGroups() {
+      for (var i = 0; i < GROUPS.length; i++) {
+        var el = toolbar.querySelector(GROUPS[i]);
+        if (!el) continue;
+        // 收起态量到的会是 0，只有展开态量的才是自然高度
+        var h = el.getBoundingClientRect().height;
+        if (h > 0) el.style.setProperty('--collapse-h', h + 'px');
+        else el.style.removeProperty('--collapse-h');
+      }
+    }
+
     function apply(next) {
       if (next === collapsed) return;
       collapsed = next;
       if (next) toolbar.setAttribute('data-collapsed', '1');
-      else toolbar.removeAttribute('data-collapsed');
+      else {
+        toolbar.removeAttribute('data-collapsed');
+        // 展开后立刻补量：视口/字体/内容变化都可能改变自然高度
+        measureGroups();
+      }
     }
 
     function evaluate() {
@@ -1736,11 +1788,34 @@
       else evaluate();
     }
 
+    /* 对外暴露的补量入口：只在展开态量（收起态量到的是 0）。
+       等一帧再量，确保上一次 DOM 改动已经完成布局。 */
+    collapseCtl = function () {
+      if (collapsed || !mq.matches) return;
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(measureGroups);
+      } else {
+        measureGroups();
+      }
+    };
+
     window.addEventListener('scroll', onScroll, { passive: true });
 
     // 视口跨过 820px 断点时立刻归位（否则窄屏收起后转宽屏会留着收起态）
-    if (mq.addEventListener) mq.addEventListener('change', evaluate);
-    else if (mq.addListener) mq.addListener(evaluate);
+    if (mq.addEventListener) mq.addEventListener('change', function () {
+      evaluate();
+      collapseCtl();
+    });
+    else if (mq.addListener) mq.addListener(function () {
+      evaluate();
+      collapseCtl();
+    });
+
+    // 首屏先量一次；字体是异步解析的，就绪后再量一次（高度可能变化）
+    collapseCtl();
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(function () { collapseCtl(); });
+    }
 
     evaluate();
   }

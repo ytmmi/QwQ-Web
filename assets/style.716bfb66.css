@@ -399,42 +399,92 @@ a { color: inherit; }
   border-bottom: 1px solid var(--line);
 }
 
-/* 移动端下滑收起筛选（2026-11-02）
+/* 移动端下滑收起筛选（2026-11-02 / 修订：改为平滑滑出）
  *
  * 用户要求：「移动端网页下滑时，只保留顶栏和搜索框（即所有筛选 tag 都随着
  * 下滑隐藏，包含『全部、传统、一般、大型』），和顶部动画区一致」。
+ * 修订要求（2026-11-02 晚）：**不是突然消失，要和顶部颜文字动画区一样滑动隐藏。**
  *
- * 做法：JS 只在 .toolbar 上打一个 data-collapsed="1"，这里据此收起三组筛选
- * （.segmented / .moods / .tags）与结果计数。搜索行始终保留。
+ * 做法：JS 只在 .toolbar 上打一个 data-collapsed="1"，这里据此**滑出**四组
+ * 筛选（.segmented / .toolbar__right / .moods / .tags）。搜索行始终保留。
  *
- * 为什么是 display:none 而不是「高度归零 + 保留元素」：
- *   · 收起时 sticky 条的高度必须真的变小，否则下滑后顶栏下面会留一段空白，
- *     内容看起来没动但实际被挡住；
- *   · display:none 会把内部可聚焦按钮一起移出 tab 序 —— 键盘用户不会掉进
- *     看不见的控件里（保留高度但 opacity:0 就会）。
+ * 为什么不再用 display:none（本次修订的核心）：
+ *   display 是离散属性，无法过渡 —— 上一版就是「瞬间消失」，与 hero 那种
+ *   「随滚动平滑离开」的观感不一致。改成 max-height + opacity + translateY 三件套：
+ *     · max-height 0 让元素**真正不占高度**（sticky 条变矮，内容不下沉留白）；
+ *     · translateY 制造「向上滑出」的方向感，与 hero 滚出视口的方向一致；
+ *     · opacity 收尾，避免边缘在裁切瞬间出现硬边。
+ *
+ * 无障碍：**用 visibility 而不是只靠 opacity 离开 tab 序**。
+ *   opacity:0 的元素仍然可聚焦，键盘用户会 Tab 进一片看不见的控件。
+ *   visibility:hidden 才是真正移出 tab 序 —— 但它也是离散属性，所以要配
+ *   transition-delay 让它**等滑出动画结束再切换**，否则动画还没跑完就被隐藏了。
+ *   展开时反向：visibility 必须**立刻**变 visible（delay 0），否则会看到
+ *   「先出现一个空白条、内容后才浮上来」。
  *
  * 只在 ≤820px 生效：桌面端这一整套规则不参与，行为与改动前完全一致。
  */
 @media (max-width: 820px) {
-  /* 收起态：三组筛选 + 结果计数整体隐藏 */
-  .toolbar[data-collapsed="1"] .segmented,
-  .toolbar[data-collapsed="1"] .moods,
-  .toolbar[data-collapsed="1"] .tags,
-  .toolbar[data-collapsed="1"] .toolbar__right {
-    display: none;
+  /* 展开态（默认）：可过渡的四组，滑出/滑入都用同一组属性。
+     transition 必须**只声明一次、且声明在展开态**（优先级较低的那条），
+     收起态不要去重复声明整组 transition —— 否则展开时浏览器用的是
+     「收起态那条带 visibility delay」的规则，导致回顶瞬间仍是 hidden。
+
+     max-height 用 CSS 变量 --collapse-h，由 JS 实测各组自然高度后写入。
+     为什么不能写死一个「够大」的上限（例如 240px）：max-height 过渡是
+     「从设定值线性插值到 0」，而元素的**实际高度 = min(内容高, max-height)**。
+     若设定值远大于内容高（240 vs 实测 ~98px），那 max-height 从 240 降到 98
+     的这 59% 时长里，实际高度**一点都没变** —— 观感是「先卡住、最后啪一下收走」，
+     正是这次要修的毛病。给准确实测高度，收缩才从第一帧就开始。 */
+  .toolbar .segmented,
+  .toolbar .toolbar__right,
+  .toolbar .moods,
+  .toolbar .tags {
+    overflow: hidden;
+    max-height: var(--collapse-h, 240px);
+    opacity: 1;
+    transform: translateY(0);
+    visibility: visible;
+    /* 展开方向：visibility 立即可见（delay 0） */
+    transition:
+      max-height 0.26s ease,
+      opacity 0.18s ease,
+      transform 0.26s ease,
+      padding 0.26s ease,
+      visibility 0s linear 0s;
   }
 
-  /* 收起态下搜索行的上下内边距收紧，让 sticky 条只剩一行的高度。
-     用 padding 变化而不是缩放，是因为搜索框本身要保持原有可点面积。 */
+  /* 收起态：向上滑出 + 淡出 + 高度归零。
+     visibility 延迟到 0.26s（= max-height 时长）之后才切 hidden，
+     这样动画期间元素仍然可见，动画结束后才真正离开 tab 序。
+     padding 一并归零 —— 否则 .moods / .tags 的上下内边距会留下残余高度
+     （实测残余 5~13px，sticky 条收不干净）。 */
+  .toolbar[data-collapsed="1"] .segmented,
+  .toolbar[data-collapsed="1"] .toolbar__right,
+  .toolbar[data-collapsed="1"] .moods,
+  .toolbar[data-collapsed="1"] .tags {
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(-10px);
+    visibility: hidden;
+    padding-top: 0;
+    padding-bottom: 0;
+    transition:
+      max-height 0.26s ease,
+      opacity 0.18s ease,
+      transform 0.26s ease,
+      padding 0.26s ease,
+      visibility 0s linear 0.26s;
+  }
+
+  /* 收起态下搜索行的上下内边距收紧，让 sticky 条平滑收成一行高度 */
   .toolbar[data-collapsed="1"] .toolbar__inner {
     padding-top: 0.5rem;
     padding-bottom: 0.5rem;
   }
 
-  /* 展开/收起过渡：只过渡内边距这类开销低的属性；
-     三组筛选是 display 切换，做不了 transition（也没必要做）。 */
   .toolbar__inner {
-    transition: padding 0.18s ease;
+    transition: padding 0.26s ease;
   }
 
   /* 锚点跳转时给顶栏让出位置，避免分区标题被 sticky 条盖住。
@@ -444,8 +494,20 @@ a { color: inherit; }
   }
 }
 
+/* 尊重「减少动态效果」：不做滑出动画，状态照切（visibility 无延迟即生效） */
 @media (max-width: 820px) and (prefers-reduced-motion: reduce) {
-  .toolbar__inner { transition: none; }
+  .toolbar .segmented,
+  .toolbar .toolbar__right,
+  .toolbar .moods,
+  .toolbar .tags,
+  .toolbar[data-collapsed="1"] .segmented,
+  .toolbar[data-collapsed="1"] .toolbar__right,
+  .toolbar[data-collapsed="1"] .moods,
+  .toolbar[data-collapsed="1"] .tags,
+  .toolbar__inner,
+  .toolbar[data-collapsed="1"] .toolbar__inner {
+    transition: none;
+  }
 }
 
 
