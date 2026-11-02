@@ -793,13 +793,9 @@
         try { document.dispatchEvent(new CustomEvent('wzy-ready')); } catch (e) {}
         // 补齐后重渲染一次：首屏只画了 boot 那几十条，现在才是全量
         render();
-        /* 面板重建后**必须补量一次滑出高度**（2026-11-02）：
-           boot 态的标签面板只有几个词条，全量补载后会多出很多标签，
-           .tags 的自然高度从 ~69px 涨到 ~98px。若不补量，
-           CSS 的 --collapse-h 还是旧值（偏小），收起时 max-height
-           已经小于内容高度 → 一上来就被裁，观感是「突然跳一下再走」。
-           这里调 remeasureCollapse()（在 initMobileCollapse 里暴露）。 */
-        remeasureCollapse();
+        /* 注：这里**不需要**再补量滑出高度。收起高度现在是"每次收起前实测"
+           （见 captureStartHeights），不缓存、不预存，所以面板重建后高度变化
+           会自动被下一次收起读到，不存在「变量过期导致裁切」的问题。 */
       }, function (bad) {
         shardState.failed = true;
         if (done) done();
@@ -1697,13 +1693,13 @@
    *   · 顶部动画区（.hero）本来就不是 sticky，下滑时自然滚出视口 ——
    *     它不是被这段逻辑收起的，只是「一起消失」；观感要与之一致。
    *
-   * 本版修订的关键：上一版在阈值处直接切 display:none，是**突变**；
+   * 本版修订的关键（两轮）：上一版在阈值处直接切 display:none，是**突变**；
    * 现在改成**平滑滑出**。两个层面配合：
    *   · CSS（style.css 的同名小节）负责形态：max-height + opacity + translateY
    *     过渡，向上滑出并真正让出高度；
    *   · JS 负责两件事：① 触发时机（滚动越过分档阈值后进入收起态）；
-   *     ② **实测各组自然高度并写进 --collapse-h**（见下方 measureGroups 注释，
-   *     这是「第一帧就开始收」而不是「先卡住再收」的前提）。
+   *     ② **每次收起前实测各组真实高度并写进 --collapse-from**，让收缩从
+   *     第一帧就开始（详见 captureStartHeights 注释）。
    *
    * 为什么不逐像素驱动动画（把 scrollY 直接映射成 translateY）：
    *   sticky 元素的高度变化会反过来改变 scrollY 的可用范围，逐像素驱动会
@@ -1717,16 +1713,6 @@
    *   · prefers-reduced-motion 下不做过渡（CSS 侧 transition:none），状态照切；
    *   · 收起后按钮离开 tab 序由 CSS 的 visibility 负责（见 style.css 注释）。
    */
-  var collapseCtl = null;   // 暴露给 loadRemaining 的补量入口
-
-  /**
-   * 数据补载后面板会重建（标签变多、情绪计数变全），自然高度随之改变。
-   * 调用它让收起动画用新的高度，否则 --collapse-h 偏小会「一上来就被裁」。
-   */
-  function remeasureCollapse() {
-    if (collapseCtl) collapseCtl();
-  }
-
   function initMobileCollapse() {
     var toolbar = document.querySelector('.toolbar');
     if (!toolbar || !window.matchMedia) return;
@@ -1737,36 +1723,84 @@
     var queued = false;
     var collapsed = false;
 
-    /* 参与滑出的四组。每组在展开态量一次自然高度，写进 style 里的
-       --collapse-h（CSS 的 max-height 读它）。
-       为什么必须实测、不能写死一个「够大的上限」：max-height 过渡是
-
-       「从设定值线性插值到 0」，而元素实际高度 = min(内容高, max-height)。
-       若设定值远大于内容高（例如 240 vs 实测 69），那 max-height 从 240
-       降到 69 的这 71% 时长里，实际高度一点都没变 —— 观感是「先卡住、
-       最后啪一下收走」，正是这次要修的毛病。给准确实测值，收缩才从第一帧开始。 */
+    /* 参与滑出的四组。
+       max-height 的过渡两端都必须**具体像素**（none→0 无法插值，会直接跳变）。
+       展开态 CSS 里不设上限（内容永远完整、绝不被裁），所以这里在切换的瞬间
+       手动写 inline max-height 做「起点 → 终点」：
+         收起：写 Hpx（实测）→ 强制回排 → 写入 0（data-collapsed 同时打上）
+         展开：移除 data-collapsed（CSS 里 opacity/transform 回位），
+               同时写 Hpx → 强制回排 → 下一帧清掉 inline（回到不设上限）
+       每次都现测，不缓存 —— 分片补载/字体就绪/换行都会改高度，缓存必过期。 */
     var GROUPS = ['.segmented', '.toolbar__right', '.moods', '.tags'];
+    var DUR = 260;   // 与 CSS 的 0.26s 对齐
 
-    function measureGroups() {
-      for (var i = 0; i < GROUPS.length; i++) {
-        var el = toolbar.querySelector(GROUPS[i]);
-        if (!el) continue;
-        // 收起态量到的会是 0，只有展开态量的才是自然高度
-        var h = el.getBoundingClientRect().height;
-        if (h > 0) el.style.setProperty('--collapse-h', h + 'px');
-        else el.style.removeProperty('--collapse-h');
+    var groupEls = [];
+    for (var gi = 0; gi < GROUPS.length; gi++) {
+      var ge = toolbar.querySelector(GROUPS[gi]);
+      if (ge) groupEls.push(ge);
+    }
+
+    /** 强制同步回排，让刚写入的 inline max-height 真正成为过渡起点 */
+    function forceReflow() {
+      // 读取 layout 属性触发 reflow；值不使用
+      void toolbar.offsetHeight;
+    }
+
+    /** 取某组的真实内容高度（展开态下等于内容高；收起态下为 0，此时不能测） */
+    function naturalHeight(el) {
+      return el.getBoundingClientRect().height;
+    }
+
+    function collapseGroups() {
+      // 1) 先把起点固定成当前真实高度（此时仍是展开态，能量准）
+      for (var i = 0; i < groupEls.length; i++) {
+        var h = naturalHeight(groupEls[i]);
+        groupEls[i].style.maxHeight = (h > 0 ? h : 0) + 'px';
+      }
+      // 2) 强制一帧，让第 1 步的值成为过渡起点
+      forceReflow();
+      // 3) 打上收起态（CSS 负责 opacity/transform/visibility）
+      toolbar.setAttribute('data-collapsed', '1');
+      // 4) 下一帧把 max-height 目标写成 0，触发过渡（不是立即写，
+      //    否则起点与终点在同一帧，浏览器可能不做插值）
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(function () {
+          for (var j = 0; j < groupEls.length; j++) groupEls[j].style.maxHeight = '0px';
+        });
+      } else {
+        for (var j2 = 0; j2 < groupEls.length; j2++) groupEls[j2].style.maxHeight = '0px';
+      }
+    }
+
+    function expandGroups() {
+      // 1) 先把起点写成 0（保持收起形态），并移除收起态里的裁切目标
+      for (var i = 0; i < groupEls.length; i++) groupEls[i].style.maxHeight = '0px';
+      forceReflow();
+      // 2) 退出收起态（CSS 的 opacity/transform/visibility 回位）
+      toolbar.removeAttribute('data-collapsed');
+      // 3) 下一帧写目标高度 = 当前内容真实高度（此时已可见，可测）
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(function () {
+          for (var j = 0; j < groupEls.length; j++) {
+            var h = naturalHeight(groupEls[j]);
+            groupEls[j].style.maxHeight = (h > 0 ? h : 0) + 'px';
+          }
+          // 4) 过渡结束后清掉 inline，回到「展开态不设上限」的正确语义，
+          //    否则内容再多一点就会被这个像素值裁掉（本次踩过的坑）
+          setTimeout(function () {
+            for (var k = 0; k < groupEls.length; k++) groupEls[k].style.maxHeight = '';
+          }, DUR + 40);
+        });
+      } else {
+        for (var j3 = 0; j3 < groupEls.length; j3++) groupEls[j3].style.maxHeight = '';
       }
     }
 
     function apply(next) {
       if (next === collapsed) return;
       collapsed = next;
-      if (next) toolbar.setAttribute('data-collapsed', '1');
-      else {
-        toolbar.removeAttribute('data-collapsed');
-        // 展开后立刻补量：视口/字体/内容变化都可能改变自然高度
-        measureGroups();
-      }
+      if (next) collapseGroups();
+      else expandGroups();
     }
 
     function evaluate() {
@@ -1788,34 +1822,11 @@
       else evaluate();
     }
 
-    /* 对外暴露的补量入口：只在展开态量（收起态量到的是 0）。
-       等一帧再量，确保上一次 DOM 改动已经完成布局。 */
-    collapseCtl = function () {
-      if (collapsed || !mq.matches) return;
-      if (window.requestAnimationFrame) {
-        window.requestAnimationFrame(measureGroups);
-      } else {
-        measureGroups();
-      }
-    };
-
     window.addEventListener('scroll', onScroll, { passive: true });
 
     // 视口跨过 820px 断点时立刻归位（否则窄屏收起后转宽屏会留着收起态）
-    if (mq.addEventListener) mq.addEventListener('change', function () {
-      evaluate();
-      collapseCtl();
-    });
-    else if (mq.addListener) mq.addListener(function () {
-      evaluate();
-      collapseCtl();
-    });
-
-    // 首屏先量一次；字体是异步解析的，就绪后再量一次（高度可能变化）
-    collapseCtl();
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(function () { collapseCtl(); });
-    }
+    if (mq.addEventListener) mq.addEventListener('change', evaluate);
+    else if (mq.addListener) mq.addListener(evaluate);
 
     evaluate();
   }
