@@ -1746,13 +1746,23 @@
       void toolbar.offsetHeight;
     }
 
-    /** 取某组的真实内容高度（展开态下等于内容高；收起态下为 0，此时不能测） */
+    /** 取某组的真实内容高度。
+        注意：不能直接用 getBoundingClientRect().height —— 当 inline max-height
+        被设成 0（收起态）时，盒子高度就是 0，量到的永远是 0。必须先临时解除
+        max-height 才能量到真实内容高度，量完立刻恢复原值。
+        这是本次线上踩到的真 bug：展开时在 max-height:0 状态下测量，
+        得到的 H=0，于是"目标高度"又设成 0，元素只能等兜底的 setTimeout 清掉
+        inline 才"跳"回满高 —— 表现就是展开不丝滑、且中途采样到 1px 这种怪值。 */
     function naturalHeight(el) {
-      return el.getBoundingClientRect().height;
+      var saved = el.style.maxHeight;
+      el.style.maxHeight = 'none';
+      var h = el.getBoundingClientRect().height;
+      el.style.maxHeight = saved;
+      return h;
     }
 
     function collapseGroups() {
-      // 1) 先把起点固定成当前真实高度（此时仍是展开态，能量准）
+      // 1) 先把起点固定成当前真实高度（此时仍是展开态，max-height 没有限制）
       for (var i = 0; i < groupEls.length; i++) {
         var h = naturalHeight(groupEls[i]);
         groupEls[i].style.maxHeight = (h > 0 ? h : 0) + 'px';
@@ -1773,20 +1783,26 @@
     }
 
     function expandGroups() {
-      // 1) 先把起点写成 0（保持收起形态），并移除收起态里的裁切目标
-      for (var i = 0; i < groupEls.length; i++) groupEls[i].style.maxHeight = '0px';
+      /* 展开顺序很讲究（本次踩过坑）：
+         ① 先在收起形态下量到真实高度 —— 靠 naturalHeight 临时解除限制；
+         ② 把 max-height 起点写成 0px 并回排（保持收起形态，作为过渡起点）；
+         ③ 退出收起态（opacity/transform/visibility 由 CSS 回位）；
+         ④ 下一帧写目标 = 真实高度 → 平滑展开；
+         ⑤ 过渡结束后清空 inline，回到「展开态不设上限」的正确语义，
+            否则内容一多就会被这个像素值裁掉。 */
+      for (var i = 0; i < groupEls.length; i++) {
+        groupEls[i].style.maxHeight = '0px';
+      }
       forceReflow();
-      // 2) 退出收起态（CSS 的 opacity/transform/visibility 回位）
+
       toolbar.removeAttribute('data-collapsed');
-      // 3) 下一帧写目标高度 = 当前内容真实高度（此时已可见，可测）
+
       if (window.requestAnimationFrame) {
         window.requestAnimationFrame(function () {
           for (var j = 0; j < groupEls.length; j++) {
             var h = naturalHeight(groupEls[j]);
             groupEls[j].style.maxHeight = (h > 0 ? h : 0) + 'px';
           }
-          // 4) 过渡结束后清掉 inline，回到「展开态不设上限」的正确语义，
-          //    否则内容再多一点就会被这个像素值裁掉（本次踩过的坑）
           setTimeout(function () {
             for (var k = 0; k < groupEls.length; k++) groupEls[k].style.maxHeight = '';
           }, DUR + 40);
